@@ -24,7 +24,7 @@ import tarfile
 from subprocess import PIPE, Popen
 from urllib.parse import urlparse
 import io
-# from petrel_client.client import Client
+from wenet.dataset.client import Client
 
 import torch
 import torchaudio
@@ -32,28 +32,6 @@ import torchaudio.compliance.kaldi as kaldi
 from torch.nn.utils.rnn import pad_sequence
 
 AUDIO_FORMAT_SETS = set(['flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'wma'])
-
-class MyClient(object):
-    def __init__(self):
-        self.client = Client("~/petreloss.conf")
-    def get(self, key, enable_stream=False):
-        index = key.find("/")
-        bucket = key[:index]
-        key = key[index+1:]
-        if bucket == "asr":
-            return self.client.get("asr:s3://{}/".format(bucket) + key, no_cache=True, enable_stream=enable_stream)
-        elif bucket == "youtubeBucket":
-            return self.client.get("youtube:s3://{}/".format(bucket) + key, no_cache=True, enable_stream=enable_stream)
-        elif bucket == "exp":
-            return self.client.get("asr:s3://{}/".format(bucket) + key, no_cache=True, enable_stream=enable_stream)
-    def get_file_iterator(self, key):
-        index = key.find("/")
-        bucket = key[:index]
-        key = key[index+1:]
-        if bucket == "asr":
-            return self.client.get_file_iterator("s3://asr/" + key)
-        elif bucket == "youtubeBucket":
-            return self.client.get_file_iterator("youtube:s3://{}/".format(bucket) + key)
 
 def url_opener(data):
     """ Give url or local file, return file descriptor
@@ -65,7 +43,7 @@ def url_opener(data):
         Returns:
             Iterable[{src, stream}]
     """
-    client = MyClient()
+    client = Client()
     for sample in data:
         assert 'src' in sample
         # TODO(Binbin Zhang): support HTTP
@@ -110,7 +88,7 @@ def tar_file_and_group(data, client=None, vad=None):
         Returns:
             Iterable[{key, wav, txt, sample_rate}]
     """
-    client = MyClient()
+    client = Client()
     for sample in data:
         assert 'stream' in sample
         stream = tarfile.open(fileobj=sample['stream'], mode="r|*")
@@ -190,7 +168,7 @@ def parse_raw(data):
         Returns:
             Iterable[{key, wav, txt, sample_rate}]
     """
-    client = MyClient()
+    client = Client()
     for sample in data:
         segs = sample['src'].split("\t")
         if len(segs) < 2:
@@ -228,24 +206,24 @@ def parse_raw_classification(data, category_dict):
         Returns:
             Iterable[{key, wav, category, sample_rate}]
     """
-    # client = MyClient()
+    client = Client()
     for sample in data:
         assert 'src' in sample
         json_line = sample['src']
         obj = json.loads(json_line)
         assert 'key' in obj
         assert 'wav' in obj
-        assert 'txt' in obj
+        assert 'emo' in obj
         key = obj['key']
         wav_file = obj['wav']
-        category = obj['txt']
-        #wav_file = key
+        category = obj['emo']
         try:
-            # tarcontent = client.get(key)
-            # tarbytes = copy.deepcopy(tarcontent)
-            # with io.BytesIO(tarbytes) as fobj: 
-            #     waveform, sample_rate = torchaudio.load(fobj)
-            waveform, sample_rate = torchaudio.load(wav_file)
+            #print(wav_file)
+            tarcontent = client.get(wav_file)
+            tarbytes = copy.deepcopy(tarcontent)
+            with io.BytesIO(tarbytes) as fobj: 
+                waveform, sample_rate = torchaudio.load(fobj)
+           # waveform, sample_rate = torchaudio.load(wav_file)
             # waveform = torch.concat([waveform, torch.zeros(1,300*16)], 1)
             label = category_dict[category] # eg. convert 'happy' to '2'
             one_hot = torch.nn.functional.one_hot(torch.tensor(label).long(), num_classes=len(category_dict))
@@ -432,7 +410,42 @@ def compute_fbank(data,
 
         yield dict(key=sample['key'], label=sample['label'], feat=mat)
 
+def compute_mfcc(data,
+                 num_mel_bins=23,
+                 frame_length=25,
+                 frame_shift=10,
+                 dither=0.0,
+                 num_ceps=40,
+                 high_freq=0.0,
+                 low_freq=20.0):
+    """ Extract mfcc
 
+        Args:
+            data: Iterable[{key, wav, label, sample_rate}]
+
+        Returns:
+            Iterable[{key, feat, label}]
+    """
+    for sample in data:
+        assert 'sample_rate' in sample
+        assert 'wav' in sample
+        assert 'key' in sample
+        assert 'label' in sample
+        sample_rate = sample['sample_rate']
+        waveform = sample['wav']
+        waveform = waveform * (1 << 15)
+        # Only keep key, feat, label
+        mat = kaldi.mfcc(waveform,
+                         num_mel_bins=num_mel_bins,
+                         frame_length=frame_length,
+                         frame_shift=frame_shift,
+                         dither=dither,
+                         num_ceps=num_ceps,
+                         high_freq=high_freq,
+                         low_freq=low_freq,
+                         sample_frequency=sample_rate)
+        yield dict(key=sample['key'], label=sample['label'], feat=mat)
+        
 def tokenize_space(data, symbol_table):
     '''
         eg : text: 你 好 中 国 _h e l l o _w o r l d

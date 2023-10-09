@@ -54,7 +54,8 @@ class BaseEncoder(torch.nn.Module):
         static_chunk_size: int = 0,
         use_dynamic_chunk: bool = False,
         global_cmvn: torch.nn.Module = None,
-        use_dynamic_left_chunk: bool = False
+        use_dynamic_left_chunk: bool = False,
+        use_addition_ln: bool=True,
     ):
         """
         Args:
@@ -120,6 +121,7 @@ class BaseEncoder(torch.nn.Module):
         self.static_chunk_size = static_chunk_size
         self.use_dynamic_chunk = use_dynamic_chunk
         self.use_dynamic_left_chunk = use_dynamic_left_chunk
+        self.use_addition_ln = use_addition_ln
 
     def output_size(self) -> int:
         return self._output_size
@@ -164,8 +166,9 @@ class BaseEncoder(torch.nn.Module):
                                               num_decoding_left_chunks)
         for layer in self.encoders:
             xs, chunk_masks, _, _ = layer(xs, chunk_masks, pos_emb, mask_pad)
-        if self.normalize_before:
-            xs = self.after_norm(xs)
+        if self.use_addition_ln:
+            if self.normalize_before:
+                xs = self.after_norm(xs)
         # Here we assume the mask is not changed in encoder layers, so just
         # return the masks before encoder layers, and the masks will be used
         # for cross attention with decoder later
@@ -387,6 +390,7 @@ class ConformerEncoder(BaseEncoder):
         cnn_module_kernel: int = 15,
         causal: bool = False,
         cnn_module_norm: str = "batch_norm",
+        use_addition_ln: bool = True,
     ):
         """Construct ConformerEncoder
 
@@ -409,7 +413,7 @@ class ConformerEncoder(BaseEncoder):
                          positional_dropout_rate, attention_dropout_rate,
                          input_layer, pos_enc_layer_type, normalize_before,
                          static_chunk_size, use_dynamic_chunk,
-                         global_cmvn, use_dynamic_left_chunk)
+                         global_cmvn, use_dynamic_left_chunk, use_addition_ln)
         activation = get_activation(activation_type)
 
         # self-attention module definition

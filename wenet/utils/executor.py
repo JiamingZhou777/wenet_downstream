@@ -19,6 +19,7 @@ from contextlib import nullcontext
 # from contextlib import suppress as nullcontext
 import torch
 from torch.nn.utils import clip_grad_norm_
+import pdb
 
 
 class Executor:
@@ -149,12 +150,13 @@ class Executor:
                             log_str += '{} {:.6f} '.format(name, value.item())
                     log_str += 'lr {:.8f} rank {}'.format(lr, rank)
                     logging.info(log_str)
-                    logger.info(log_str)
+                    # logger.info(log_str)
 
     def cv(self, model, data_loader, device, args, logger):
         ''' Cross validation on
         '''
         model.eval()
+        model.metrics_reset()
         rank = args.get('rank', 0)
         epoch = args.get('epoch', 0)
         log_interval = args.get('log_interval', 10)
@@ -203,4 +205,139 @@ class Executor:
                     log_str += ' rank {}'.format(rank)
                     logging.info(log_str)
                     logger.info(log_str)
-        return total_loss, num_seen_utts
+            acc = model.get_acc()
+        return total_loss, num_seen_utts, acc
+
+    def train_with_2_optimizer(self, model, optimizer_1, optimizer_2, scheduler_1, scheduler_2, 
+                            data_loader, device, writer, args, scaler, logger):
+            ''' Train one epoch with 2 optimizers and schedulers
+                lr : return linear lr.
+            '''
+            model.train()
+            clip = args.get('grad_clip', 50.0)
+            log_interval = args.get('log_interval', 10)
+            rank = args.get('rank', 0)
+            epoch = args.get('epoch', 0)
+            accum_grad = args.get('accum_grad', 1)
+            is_distributed = args.get('is_distributed', True)
+            is_deepspeed = args.get('is_deepspeed', False)
+            use_amp = args.get('use_amp', False)
+            ds_dtype = args.get('ds_dtype', "fp32")
+            if ds_dtype == "fp16":
+                ds_dtype = torch.float16
+            elif ds_dtype == "bf16":
+                ds_dtype = torch.bfloat16
+            else:
+                ds_dtype = None
+            logging.info('using accumulate grad, new batch size is {} times'
+                        ' larger than before'.format(accum_grad))
+            if use_amp:
+                assert scaler is not None
+            # A context manager to be used in conjunction with an instance of
+            # torch.nn.parallel.DistributedDataParallel to be able to train
+            # with uneven inputs across participating processes.
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                model_context = model.join
+            else:
+                model_context = nullcontext
+            num_seen_utts = 0
+            with model_context():
+                for batch_idx, batch in enumerate(data_loader):
+                    key, feats, target, feats_lengths, target_lengths = batch
+                    feats = feats.to(device)
+                    target = target.to(device)
+                    feats_lengths = feats_lengths.to(device)
+                    target_lengths = target_lengths.to(device)
+                    num_utts = target_lengths.size(0)
+                    if num_utts == 0:
+                        continue
+                    context = None
+                    # Disable gradient synchronizations across DDP processes.
+                    # Within this context, gradients will be accumulated on module
+                    # variables, which will later be synchronized.
+                    if is_distributed and batch_idx % accum_grad != 0:
+                        context = model.no_sync
+                    # Used for single gpu training and DDP gradient synchronization
+                    # processes.
+                    else:
+                        context = nullcontext
+                    with context():
+                        if is_deepspeed:  # deepspeed
+                            with torch.cuda.amp.autocast(
+                                enabled=ds_dtype is not None,
+                                dtype=ds_dtype, cache_enabled=False
+                            ):
+                                loss_dict = model(feats, feats_lengths, target,
+                                                target_lengths)
+                            loss = loss_dict['loss']
+                            # NOTE(xcsong): Zeroing the gradients is handled automatically by DeepSpeed after the weights # noqa
+                            #   have been updated using a mini-batch. DeepSpeed also performs gradient averaging automatically # noqa
+                            #   at the gradient accumulation boundaries and addresses clip_grad_norm internally. In other words # noqa
+                            #   `model.backward(loss)` is equivalent to `loss.backward() + clip_grad_norm_() + optimizer.zero_grad() + accum_grad` # noqa
+                            #   ref: https://www.deepspeed.ai/tutorials/megatron/#using-the-training-api  # noqa
+                            model.backward(loss)
+                        else:             # pytorch native ddp
+                            # autocast context
+                            # The more details about amp can be found in
+                            # https://pytorch.org/docs/stable/notes/amp_examples.html
+                            with torch.cuda.amp.autocast(scaler is not None):
+                                loss_dict = model(feats, feats_lengths, target,
+                                                target_lengths)
+                                loss = loss_dict['loss'] / accum_grad
+                            if use_amp:
+                                scaler.scale(loss).backward()
+                            else:
+                                loss.backward()
+
+                    num_seen_utts += num_utts
+                    if is_deepspeed:
+                        if rank == 0 and writer is not None \
+                                and model.is_gradient_accumulation_boundary():
+                            writer.add_scalar('train_loss', loss.item(), self.step)
+                        # NOTE(xcsong): The step() function in DeepSpeed engine updates the model parameters as well as the learning rate. There is # noqa
+                        #   no need to manually perform scheduler.step(). In other words: `ds_model.step() = optimizer.step() + scheduler.step()` # noqa
+                        #   ref: https://www.deepspeed.ai/tutorials/megatron/#using-the-training-api  # noqa
+                        model.step()
+                        self.step += 1
+                    elif not is_deepspeed and batch_idx % accum_grad == 0:
+                        if rank == 0 and writer is not None:
+                            writer.add_scalar('train_loss', loss, self.step)
+                        # Use mixed precision training
+                        if use_amp:
+                            scaler.unscale_(optimizer_1)
+                            scaler.unscale_(optimizer_2)
+                            grad_norm = clip_grad_norm_(model.parameters(), clip)
+                            # Must invoke scaler.update() if unscale_() is used in
+                            # the iteration to avoid the following error:
+                            #   RuntimeError: unscale_() has already been called
+                            #   on this optimizer since the last update().
+                            # We don't check grad here since that if the gradient
+                            # has inf/nan values, scaler.step will skip
+                            # optimizer.step().
+                            scaler.step(optimizer_1)
+                            scaler.step(optimizer_2)
+                            scaler.update()
+                        else:
+                            grad_norm = clip_grad_norm_(model.parameters(), clip)
+                            if torch.isfinite(grad_norm):
+                                optimizer_1.step()
+                                optimizer_2.step()
+                        optimizer_1.zero_grad()
+                        optimizer_2.zero_grad()
+                        scheduler_1.step()
+                        scheduler_2.step()
+                        self.step += 1
+
+                    if batch_idx % log_interval == 0:
+                        lr_1 = optimizer_1.param_groups[0]['lr']
+                        lr_2 = optimizer_2.param_groups[0]['lr']
+                        log_str = 'TRAIN Batch {}/{} loss {:.6f} '.format(
+                            epoch, batch_idx,
+                            loss.item() * accum_grad)
+                        for name, value in loss_dict.items():
+                            if name != 'loss' and value is not None:
+                                log_str += '{} {:.6f} '.format(name, value.item())
+                        log_str += 'lr_1 {:.8f} rank {} '.format(lr_1, rank)
+                        log_str += 'lr_2 {:.8f} rank {} '.format(lr_2, rank)
+                        logging.info(log_str)
+                        # logger.info(log_str)

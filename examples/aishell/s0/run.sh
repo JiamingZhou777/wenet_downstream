@@ -45,7 +45,7 @@ train_set=train
 # 5. conf/train_u2++_conformer.yaml: U2++ conformer
 # 6. conf/train_u2++_transformer.yaml: U2++ transformer
 train_config=conf/train_conformer.yaml
-cmvn=true
+cmvn=false
 dir=exp/conformer
 checkpoint=
 num_workers=8
@@ -78,13 +78,13 @@ fi
 
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
   # remove the space between the text labels for Mandarin dataset
-  for x in train dev test; do
-    cp data/${x}/text data/${x}/text.org
-    paste -d " " <(cut -f 1 -d" " data/${x}/text.org) \
-      <(cut -f 2- -d" " data/${x}/text.org | tr -d " ") \
-      > data/${x}/text
-    rm data/${x}/text.org
-  done
+  # for x in train dev test; do
+  #   cp data/${x}/text data/${x}/text.org
+  #   paste -d " " <(cut -f 1 -d" " data/${x}/text.org) \
+  #     <(cut -f 2- -d" " data/${x}/text.org | tr -d " ") \
+  #     > data/${x}/text
+  #   rm data/${x}/text.org
+  # done
 
   tools/compute_cmvn_stats.py --num_workers 16 --train_config $train_config \
     --in_scp data/${train_set}/wav.scp \

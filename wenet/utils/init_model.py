@@ -122,7 +122,7 @@ def init_model(configs):
     elif 'ssl_conf' in configs:
         model = BestRQModel(encoder, **configs['ssl_conf'])
     elif 'emotion_recognition' in configs:
-        model = EmotionRecognitionModel(category_size = 4,
+        model = EmotionRecognitionModel(category_size = vocab_size,
                                         encoder=encoder, 
                                         **configs['model_conf'])
     else:

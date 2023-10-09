@@ -145,8 +145,8 @@ def main():
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.local_rank)
-    print(args.local_rank)
+    # os.environ['CUDA_VISIBLE_DEVICES'] = str(args.local_rank)
+    # print(args.local_rank)
 
     # Set random seed
     torch.manual_seed(777)
@@ -267,9 +267,37 @@ def main():
         use_cuda = args.gpu >= 0 and torch.cuda.is_available()
         device = torch.device('cuda' if use_cuda else 'cpu')
         model = model.to(device)
+    # zjm add
+    use_2_optimizer = True
+    use_constant_lr = False
+    if use_2_optimizer :
+        if use_constant_lr:
+            optimizer_1 = optim.Adam(model.encoder.encoders.parameters(),**configs['optim_conf_1'])
+            optimizer_2 = optim.Adam(model.linear.parameters(),**configs['optim_conf_2'])
 
-    optimizer = optim.Adam(model.parameters(), **configs['optim_conf'])
-    scheduler = WarmupLR(optimizer, **configs['scheduler_conf'])
+            from torch.optim.lr_scheduler import LambdaLR
+            #scheduler_1 = WarmupLR(optimizer_1, **configs['scheduler_conf_1'])
+            scheduler_1 = LambdaLR(optimizer_1, lr_lambda=lambda epoch:1.0)
+            scheduler_2 = WarmupLR(optimizer_2, **configs['scheduler_conf_2'])
+            #scheduler_2 = LambdaLR(optimizer_2, lr_lambda=lambda epoch:1.0)
+            executor.step = step
+            scheduler_2.set_step(step)
+        else:
+            optimizer_1 = optim.Adam(model.encoder.encoders.parameters(), **configs['optim_conf_1'])
+            optimizer_2 = optim.Adam(model.linear.parameters(), **configs['optim_conf_2'])
+            scheduler_1 = WarmupLR(optimizer_1, **configs['scheduler_conf_1'])
+            scheduler_2 = WarmupLR(optimizer_2, **configs['scheduler_conf_2'])
+            # Start training loop
+            executor.step = step
+            scheduler_1.set_step(step)
+            scheduler_2.set_step(step)
+    else:
+        optimizer = optim.Adam(model.parameters(), **configs['optim_conf'])
+        scheduler = WarmupLR(optimizer, **configs['scheduler_conf'])
+        # Start training loop
+        executor.step = step
+        scheduler.set_step(step)
+
     final_epoch = None
     configs['rank'] = args.rank
     configs['is_distributed'] = distributed
@@ -278,9 +306,6 @@ def main():
         save_model_path = os.path.join(model_dir, 'init.pt')
         save_checkpoint(model, save_model_path)
 
-    # Start training loop
-    executor.step = step
-    scheduler.set_step(step)
     # used for pytorch amp mixed precision training
     scaler = None
     if args.use_amp:
@@ -289,16 +314,25 @@ def main():
     for epoch in range(start_epoch, num_epochs):
         train_dataset.set_epoch(epoch)
         configs['epoch'] = epoch
-        lr = optimizer.param_groups[0]['lr']
-        logging.info('Epoch {} TRAIN info lr {}'.format(epoch, lr))
-        executor.train(model, optimizer, scheduler, train_data_loader, device,
-                       writer, configs, scaler, logger)
-        total_loss, num_seen_utts = executor.cv(model, cv_data_loader, device,
+        if use_2_optimizer:
+            lr_1 = optimizer_1.param_groups[0]['lr']
+            lr_2 = optimizer_2.param_groups[0]['lr']
+            logging.info('Epoch {} TRAIN info lr_1 {} ; lr_2 {}'.format(epoch, lr_1, lr_2))
+            executor.train_with_2_optimizer(model, optimizer_1, optimizer_2, scheduler_1, scheduler_2, 
+                                            train_data_loader, device,writer, configs, scaler, logger)
+        else:
+            lr = optimizer.param_groups[0]['lr']
+            logging.info('Epoch {} TRAIN info lr {}'.format(epoch, lr))
+            executor.train(model, optimizer, scheduler, train_data_loader, device,
+                        writer, configs, scaler, logger)
+        total_loss, num_seen_utts, acc = executor.cv(model, cv_data_loader, device,
                                                 configs, logger)
         cv_loss = total_loss / num_seen_utts
-        logging.info('Epoch {} CV info cv_loss {}'.format(epoch, cv_loss))
+        logging.info('Epoch {} CV info cv_loss {}, acc {}'.format(epoch, cv_loss, acc))
         if args.rank == 0:
-            save_model_path = os.path.join(model_dir, '{}.pt'.format(epoch))
+            # save_model_path = os.path.join(model_dir, '{}.pt'.format(epoch))
+            save_model_path = os.path.join(model_dir, '{}.pt'.format("latest"))
+            lr=lr_2
             save_checkpoint(
                 model, save_model_path, {
                     'epoch': epoch,
@@ -307,7 +341,9 @@ def main():
                     'step': executor.step
                 })
             writer.add_scalar('epoch/test_loss', cv_loss, epoch)
-            writer.add_scalar('epoch/lr', lr, epoch)
+            writer.add_scalar('epoch/lr_1', lr_1, epoch)
+            writer.add_scalar('epoch/lr_2', lr_2, epoch)
+            writer.add_scalar('epoch/acc', acc, epoch)
         final_epoch = epoch
 
     if final_epoch is not None and args.rank == 0:

@@ -2,9 +2,7 @@
 export PYTHONPATH=/mnt/petrelfs/zhongguipin/git/wenet_downstream
 export NCCL_DEBUG=INFO
 
-exp_tag="20230919_160000pt"
-#cmvn=/mnt/petrelfs/zhongguipin/git/wenet_downstream/examples/bestrq/exp/20230905_180000pt/librispeech_global_cmvn
-#20230804 except last encoder layer
+exp_tag="train"
 
 echo "begin training"
 # export CUDA_VISIBLE_DEVICES="0"
@@ -15,17 +13,16 @@ train_shards=data/fold1/train.list
 cv_shards=data/fold1/test.list
 
 model=exp/$exp_tag/ckpts/
-#tensorboard=exp/$exp_tag/tensorboard/finetune_bz1_nosort_2optimizer
-tensorboard=exp/$exp_tag/tensorboard/test_bz8_cmvn_1e-5_s3prl_2linear
+# tensorboard=exp/$exp_tag/tensorboard/test_simple_0803_freeze_nofreeze1_bz1_nosort
+tensorboard=exp/20230804/tensorboard/test_bz1_nosort_warm30000
 # config=./train_emotion.yaml
-# config=./conf/train_conformer.yaml
-config=./exp/$exp_tag/bestrq.yaml
+config=./conf/train_conformer.yaml
+# config=./exp/20230804/bestrq.yaml
 
 mkdir -p $model
 mkdir -p $tensorboard
-cmvn=exp/$exp_tag/librispeech_global_cmvn
-# checkpoint=exp/20230804/97000.pt
-checkpoint=exp/$exp_tag/160000.pt
+# cmvn=exp/$exp_tag/global_cmvn
+# checkpoint=exp/$exp_tag/ckpts/74.pt
 
 # b /mnt/petrelfs/zhongguipin/git/wenet_downstream/wenet/transformer/emotion_recognition_model.py
 python   ${train_path} --gpu "0" \
@@ -37,9 +34,9 @@ python   ${train_path} --gpu "0" \
            --cv_data ${cv_shards} \
            --config ${config} \
            --num_workers 4 \
-           --tensorboard_dir  ${tensorboard} \
-           --checkpoint $checkpoint  \
-           --cmvn  $cmvn 
+           --tensorboard_dir  ${tensorboard} # \
+           # --checkpoint $checkpoint 
+#            --cmvn  $cmvn \
 
 # num_gpus=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
 # num_nodes=1

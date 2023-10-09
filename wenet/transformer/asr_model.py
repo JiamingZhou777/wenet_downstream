@@ -110,9 +110,9 @@ class ASRModel(torch.nn.Module):
                 text_lengths.shape[0]), (speech.shape, speech_lengths.shape,
                                          text.shape, text_lengths.shape)
 
-        if self.input_ln:
-            assert self.encoder.global_cmvn is None
-            speech = self.input_ln(speech)
+        # if self.input_ln:
+        #     assert self.encoder.global_cmvn is None
+        #     speech = self.input_ln(speech)
         # 1. Encoder
         encoder_out, encoder_mask = self.encoder(speech, speech_lengths)
         encoder_out_lens = encoder_mask.squeeze(1).sum(1)

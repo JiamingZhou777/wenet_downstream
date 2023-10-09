@@ -20,6 +20,7 @@ from torch.utils.data import IterableDataset
 
 import wenet.dataset.processor_s3 as processor
 from wenet.utils.file_utils import read_lists
+import pdb
 
 class Processor(IterableDataset):
     def __init__(self, source, f, *args, **kw):
@@ -127,7 +128,7 @@ def Dataset(data_type, data_list_file, category_dict, conf, partition=True):
         dataset = Processor(dataset, processor.tar_file_and_group, vad=True)
     else:
         dataset = Processor(dataset, processor.parse_raw_classification, category_dict)
-
+    # len(list(torch.utils.data.DataLoader(dataset, num_workers=2)))
     # keep the same as wenet after this line.
     filter_conf = conf.get('filter_conf', {})
     dataset = Processor(dataset, processor.filter, **filter_conf)
@@ -139,8 +140,14 @@ def Dataset(data_type, data_list_file, category_dict, conf, partition=True):
     if speed_perturb:
         dataset = Processor(dataset, processor.speed_perturb)
 
-    fbank_conf = conf.get('fbank_conf', {})
-    dataset = Processor(dataset, processor.compute_fbank, **fbank_conf)
+    feats_type = conf.get('feats_type', 'fbank')
+    assert feats_type in ['fbank', 'mfcc']
+    if feats_type == 'fbank':
+        fbank_conf = conf.get('fbank_conf', {})
+        dataset = Processor(dataset, processor.compute_fbank, **fbank_conf)
+    elif feats_type == 'mfcc':
+        mfcc_conf = conf.get('mfcc_conf', {})
+        dataset = Processor(dataset, processor.compute_mfcc, **mfcc_conf)
 
     spec_aug = conf.get('spec_aug', True)
     if spec_aug:

@@ -21,7 +21,6 @@ from wenet.transformer.encoder import TransformerEncoder
 import logging
 import pdb
 from wenet.utils.emotion_metics import ConfusionMetrics
-from wenet.transformer.s3prl_emotion_model import *
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -67,7 +66,6 @@ class StatisticsPooling(nn.Module):
         x : torch.Tensor
             It represents a tensor for a mini-batch.
         """
-        # pdb.set_trace()
         if lengths is None:
             if self.return_mean:
                 mean = x.mean(dim=1)
@@ -78,8 +76,8 @@ class StatisticsPooling(nn.Module):
             std = []
             for snt_id in range(x.shape[0]):
                 # Avoiding padded time steps
-                # actual_size = int(torch.round(lengths[snt_id] * x.shape[1]))
-                actual_size = lengths[snt_id]
+                actual_size = int(torch.round(lengths[snt_id] * x.shape[1]))
+
                 # computing statistics
                 if self.return_mean:
                     mean.append(
@@ -124,81 +122,27 @@ class StatisticsPooling(nn.Module):
 
         return gnoise
     
-
 class EmotionRecognitionModel(torch.nn.Module):
     def __init__(
         self,
         category_size: int,
         encoder: TransformerEncoder,
         input_ln=False,
-        s3prl_flag=True,
         **kwargs
     ):
         super().__init__()
         self.category_size = category_size
-        self.encoder = encoder
-    
+        self.fc0 = nn.Linear(in_features=40, out_features=512)
         self.pooling = StatisticsPooling(return_std=False)
-        self.linear = torch.nn.Linear(self.encoder.output_size(), self.category_size)
-        # self.criterion = torch.nn.CrossEntropyLoss(reduction='sum')
+        self.lstm = nn.LSTM(input_size=512, hidden_size=256, bidirectional=True)
+        self.tanh = nn.Tanh()
+        self.dropout = nn.Dropout(p=0.5)
+        self.fc1 = nn.Linear(in_features=512, out_features=256)
+        self.relu1 = nn.ReLU()
+        self.fc2 = nn.Linear(in_features=256, out_features=category_size)
         self.criterion = torch.nn.CrossEntropyLoss()
-
-        self.input_ln = input_ln
-        if self.input_ln:
-            self.input_ln = torch.nn.LayerNorm(
-                80, eps=1e-5, elementwise_affine=False
-            )
-            
-        self.freeze_encoder=False
-        if self.freeze_encoder:
-            # for param in self.encoder.encoders[:-1].parameters():
-            #     param.requires_grad = False
-            for param in self.encoder.encoders.parameters():
-                param.requires_grad = False
-
         self.test_metrics = ConfusionMetrics(self.category_size)
-        
-        # for s3prl
-        self.s3prl_flag = s3prl_flag
-        if self.s3prl_flag:
-            self.modelrc = {
-                    'projector_dim': 256,
-                    'select': 'UtteranceLevel',
-                    'UtteranceLevel': {
-                        'pooling': 'MeanPooling'
-                    },
-                    'DeepModel': {
-                        'model_type': 'CNNSelfAttention',
-                        'hidden_dim': 80,
-                        'kernel_size': 5,
-                        'padding': 2,
-                        'pooling': 5,
-                        'dropout': 0.4
-                    }
-                 }
-            model_cls = eval(self.modelrc['select'])
-            model_conf = self.modelrc.get(self.modelrc['select'], {})
-            self.projector = nn.Linear(self.encoder.output_size(), self.modelrc['projector_dim'])
-            self.s3prl_model = model_cls(
-                input_dim = self.modelrc['projector_dim'],
-                output_dim = self.category_size,
-                **model_conf,
-            )
-            # for DeepModel
-            # model_conf = {
-            #             'model_type': 'CNNSelfAttention',
-            #             'hidden_dim': 80,
-            #             'kernel_size': 5,
-            #             'padding': 2,
-            #             'pooling': 5,
-            #             'dropout': 0.4
-            #         }
-            # self.projector = nn.Linear(self.encoder.output_size(), self.modelrc['projector_dim'])
-            # self.s3prl_model = DeepModel(
-            #     input_dim = self.modelrc['projector_dim'],
-            #     output_dim = self.category_size,
-            #     **model_conf,
-            # )
+
     def metrics_reset(self):
         # metrics
         self.test_metrics.clear()
@@ -210,7 +154,6 @@ class EmotionRecognitionModel(torch.nn.Module):
     def get_acc(self):
         return self.test_metrics.precision
     
-
     def forward(
         self,
         speech: torch.Tensor,
@@ -228,24 +171,19 @@ class EmotionRecognitionModel(torch.nn.Module):
         """
         #logging.info(label)
         #pdb.set_trace()
-        
-        if self.input_ln:
-            assert self.encoder.global_cmvn is None
-            speech = self.input_ln(speech)
-            #print("laynorm")
-            
-        # 1. Encoder
-        encoder_out, encoder_mask = self.encoder(speech, speech_lengths)
-        if self.s3prl_flag:
-            features_len = encoder_mask.squeeze(1).sum(1).to(device=encoder_out[0].device)
-            features = self.projector(encoder_out)
-            output, _ = self.s3prl_model(features, features_len)
-        else:
-            # global avg pooling
-            encoder_out = self.pooling(encoder_out,encoder_mask.squeeze(1).sum(1))
-            encoder_out = encoder_out.squeeze(1)
-            #print("encoder_out:",encoder_out.size())
-            output = self.linear(encoder_out)
+        x = speech
+        #pdb.set_trace()
+        x = self.fc0(x)
+        x = self.pooling(x,speech_lengths)
+        #x = x.reshape((x.shape[0], 1, x.shape[1]))
+        y, (h, c) = self.lstm(x)
+        x = y.squeeze(axis=1)
+        x = self.tanh(x)
+        x = self.dropout(x)
+        x = self.fc1(x)
+        x = self.relu1(x)
+        x = self.fc2(x)
+        output = x
         label = label.type(torch.FloatTensor).to(output.device)
         self.metrics_fit(output,label)
         loss = self.criterion(output,label)
